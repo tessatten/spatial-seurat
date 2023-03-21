@@ -1,0 +1,137 @@
+---
+title: "seurat_spataial_tute"
+author: "T Attenborough"
+date: "22/02/2023"
+output: html_document
+---
+
+First, load the packages we need.
+
+```{r}
+library(Seurat)
+library(SeuratData)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+```
+
+Tutorial: Here, we will be using a recently released dataset of sagital mouse brain slices generated using the Visium v1 chemistry. There are two serial anterior sections, and two (matched) serial posterior sections.
+
+```{r}
+InstallData("stxBrain")
+```
+
+```{r}
+brain <- LoadData("stxBrain", type = "anterior1")
+```
+
+Data preprocessing
+The initial preprocessing steps that we perform on the spot by gene expression data are similar to a typical scRNA-seq experiment. We first need to normalize the data in order to account for variance in sequencing depth across data points. We note that the variance in molecular counts / spot can be substantial for spatial datasets, particularly if there are differences in cell density across the tissue. We see substantial heterogeneity here, which requires effective normalization.
+
+```{r}
+plot1 <- VlnPlot(brain, features = "nCount_Spatial", pt.size = 0.1) + NoLegend()
+plot2 <- SpatialFeaturePlot(brain, features = "nCount_Spatial") + theme(legend.position = "right")
+wrap_plots(plot1, plot2)
+```
+
+These plots demonstrate that the variance in molecular counts across spots is not just technical in nature, but also is dependent on the tissue anatomy. For example, regions of the tissue that are depleted for neurons (such as the cortical white matter), reproducibly exhibit lower molecular counts. As a result, standard approaches (such as the LogNormalize() function), which force each data point to have the same underlying ‘size’ after normalization, can be problematic.
+
+As an alternative, we recommend using sctransform (Hafemeister and Satija, Genome Biology 2019), which which builds regularized negative binomial models of gene expression in order to account for technical artifacts while preserving biological variance. For more details on sctransform, please see the paper here and the Seurat vignette here. sctransform normalizes the data, detects high-variance features, and stores the data in the SCT assay.
+
+```{r}
+brain <- SCTransform(brain, assay = "Spatial", verbose = FALSE)
+```
+
+Gene expression visualization
+In Seurat, we have functionality to explore and interact with the inherently visual nature of spatial data. The SpatialFeaturePlot() function in Seurat extends FeaturePlot(), and can overlay molecular data on top of tissue histology. For example, in this data set of the mouse brain, the gene Hpca is a strong hippocampus marker and Ttr is a marker of the choroid plexus.
+
+```{r}
+SpatialFeaturePlot(brain, features = c("Hpca", "Ttr"))
+```
+
+The default parameters in Seurat emphasize the visualization of molecular data. However, you can also adjust the size of the spots (and their transparency) to improve the visualization of the histology image, by changing the following parameters:
+
+pt.size.factor- This will scale the size of the spots. Default is 1.6
+alpha - minimum and maximum transparency. Default is c(1, 1).
+Try setting to alpha c(0.1, 1), to downweight the transparency of points with lower expression
+
+```{r}
+p1 <- SpatialFeaturePlot(brain, features = "Ttr", pt.size.factor = 1)
+p2 <- SpatialFeaturePlot(brain, features = "Ttr", alpha = c(0.1, 1))
+p1 + p2
+```
+
+Dimensionality reduction, clustering, and visualization
+We can then proceed to run dimensionality reduction and clustering on the RNA expression data, using the same workflow as we use for scRNA-seq analysis.
+
+```{r}
+brain <- RunPCA(brain, assay = "SCT", verbose = FALSE)
+brain <- FindNeighbors(brain, reduction = "pca", dims = 1:30)
+brain <- FindClusters(brain, verbose = FALSE)
+brain <- RunUMAP(brain, reduction = "pca", dims = 1:30)
+```
+
+We can then visualize the results of the clustering either in UMAP space (with DimPlot()) or overlaid on the image with SpatialDimPlot().
+
+```{r}
+p1 <- DimPlot(brain, reduction = "umap", label = TRUE)
+p2 <- SpatialDimPlot(brain, label = TRUE, label.size = 3)
+p1 + p2
+```
+
+As there are many colors, it can be challenging to visualize which voxel belongs to which cluster. We have a few strategies to help with this. Setting the label parameter places a colored box at the median of each cluster (see the plot above).
+
+You can also use the cells.highlight parameter to demarcate particular cells of interest on a SpatialDimPlot(). This can be very useful for distinguishing the spatial localization of individual clusters, as we show below:
+
+```{r}
+SpatialDimPlot(brain, cells.highlight = CellsByIdentities(object = brain, idents = c(2, 1, 4, 3,
+    5, 8)), facet.highlight = TRUE, ncol = 3)
+```
+
+Interactive plotting
+We have also built in a number of interactive plotting capabilities. Both SpatialDimPlot() and SpatialFeaturePlot() now have an interactive parameter, that when set to TRUE, will open up the Rstudio viewer pane with an interactive Shiny plot. The example below demonstrates an interactive SpatialDimPlot() in which you can hover over spots and view the cell name and current identity class (analogous to the previous do.hover behavior).
+
+```{r}
+SpatialDimPlot(brain, interactive = TRUE)
+```
+
+For SpatialFeaturePlot(), setting interactive to TRUE brings up an interactive pane in which you can adjust the transparency of the spots, the point size, as well as the Assay and feature being plotted. After exploring the data, selecting the done button will return the last active plot as a ggplot object.
+
+```{r}
+SpatialFeaturePlot(brain, features = "Ttr", interactive = TRUE)
+```
+
+The LinkedDimPlot() function links the UMAP representation to the tissue image representation and allows for interactive selection. For example, you can select a region in the UMAP plot and the corresponding spots in the image representation will be highlighted.
+
+```{r}
+LinkedDimPlot(brain)
+
+```
+
+Identification of Spatially Variable Features
+Seurat offers two workflows to identify molecular features that correlate with spatial location within a tissue. The first is to perform differential expression based on pre-annotated anatomical regions within the tissue, which may be determined either from unsupervised clustering or prior knowledge. This strategy works will in this case, as the clusters above exhibit clear spatial restriction
+
+```{r}
+de_markers <- FindMarkers(brain, ident.1 = 5, ident.2 = 6)
+SpatialFeaturePlot(object = brain, features = rownames(de_markers)[1:3], alpha = c(0.1, 1), ncol = 3)
+```
+
+An alternative approach, implemented in FindSpatiallyVariables(), is to search for features exhibiting spatial patterning in the absence of pre-annotation. The default method (method = 'markvariogram), is inspired by the Trendsceek, which models spatial transcriptomics data as a mark point process and computes a ‘variogram’, which identifies genes whose expression level is dependent on their spatial location. More specifically, this process calculates gamma(r) values measuring the dependence between two spots a certain “r” distance apart. By default, we use an r-value of ‘5’ in these analyses, and only compute these values for variable genes (where variation is calculated independently of spatial location) to save time.
+
+We note that there are multiple methods in the literature to accomplish this task, including SpatialDE, and Splotch. We encourage interested users to explore these methods, and hope to add support for them in the near future.
+
+```{r}
+brain <- FindSpatiallyVariableFeatures(brain, assay = "SCT", features = VariableFeatures(brain)[1:1000],
+    selection.method = "markvariogram")
+```
+
+Now we visualize the expression of the top 6 features identified by this measure.
+
+
+```{r}
+top.features <- head(SpatiallyVariableFeatures(brain, selection.method = "markvariogram"), 6)
+SpatialFeaturePlot(brain, features = top.features, ncol = 3, alpha = c(0.1, 1))
+```
+
+
+
